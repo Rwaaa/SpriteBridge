@@ -1,0 +1,437 @@
+// =============================================================================
+// SpriteBridgeSimulation.compute
+// Cross-platform Compute Shader (DX11/12, Metal, Vulkan, OpenGL ES 3.1 safe).
+// Strictly <= 2 RWStructuredBuffer UAVs per kernel, 16-byte struct alignment.
+// =============================================================================
+
+#pragma kernel CS_ResetIndirectArgs
+#pragma kernel CS_CullAndAnimateSprites
+#pragma kernel CS_BuildSortEntries
+#pragma kernel CS_BitonicSortLocal
+#pragma kernel CS_BitonicSortGlobalStep
+#pragma kernel CS_BitonicSortLocalMerge
+
+struct GpuSpriteInstance // 96 bytes (6 x float4)
+{
+    float3 position;
+    float  sortKey;
+
+    float4 rotation;
+
+    float3 scale;
+    uint   packedMeta;
+
+    float4 uvRect;
+
+    float4 pivotSize;
+
+    uint   packedColorRG;
+    uint   packedColorBA;
+    float  animTimeOffset;
+    float  animSpeed;
+};
+
+struct GpuVisibleSprite // 64 bytes (4 x float4)
+{
+    float3 originWS;
+    uint   packedColorRG;
+
+    float3 rightWS;
+    uint   packedColorBA;
+
+    float3 upWS;
+    uint   packedNormalFlags; // bit0: normalSign, bit1..2: packingRot, bit4..31: 28-bit sortKey
+
+    float4 uvRect;
+};
+
+struct GpuSpriteAnimClip // 16 bytes
+{
+    uint  frameStartIndex;
+    uint  frameCount;
+    float duration;
+    uint  flags;
+};
+
+struct GpuSpriteAnimFrame // 32 bytes
+{
+    float4 uvRect;
+    float4 pivotSize;
+};
+
+struct GpuSpriteSortEntry // 8 bytes
+{
+    uint sortKey;
+    uint visibleIndex;
+};
+
+// --- SRVs (Read-Only) ---
+StructuredBuffer<GpuSpriteInstance>  _SourceSprites;
+StructuredBuffer<GpuSpriteAnimClip>  _AnimClips;
+StructuredBuffer<GpuSpriteAnimFrame> _AnimFrames;
+StructuredBuffer<GpuVisibleSprite>   _VisibleSpritesRO;
+StructuredBuffer<uint>               _IndirectArgsRO;
+
+// --- UAVs (Strictly <= 2 per kernel!) ---
+RWStructuredBuffer<GpuVisibleSprite>   _VisibleSprites;
+RWStructuredBuffer<uint>               _IndirectArgs;
+RWStructuredBuffer<GpuSpriteSortEntry> _SortEntries;
+
+// --- Simulation & Culling Uniforms ---
+uint   _ActiveSpriteCount;
+uint   _BucketCount;
+uint   _MaxInstancesPerBucket;
+uint   _AnimClipCount;
+float  _GlobalTime;
+uint   _EnableFrustumCulling;
+float4 _FrustumPlanes[6];
+float4 _CameraWorldPos;  // xyz = camera world pos, w = maxCullDistSq (0 = disabled)
+float4 _CameraRightWS;
+float4 _CameraUpWS;
+float4 _YSortRange;      // x = minY, y = maxY, z = invRange (1 / (maxY - minY)), w = unused
+
+// --- Bitonic Sort Uniforms ---
+uint   _SortBucketIndex;
+uint   _SortBaseOffset;
+uint   _SortCountPow2;
+uint   _SortK;
+uint   _SortJ;
+
+inline float3 RotateByQuat(float3 v, float4 q)
+{
+    float3 t = 2.0 * cross(q.xyz, v);
+    return v + q.w * t + cross(q.xyz, t);
+}
+
+// -----------------------------------------------------------------------------
+// Kernel 1: Reset per-bucket DrawMeshInstancedIndirect args (1 UAV)
+// -----------------------------------------------------------------------------
+[numthreads(64, 1, 1)]
+void CS_ResetIndirectArgs(uint3 id : SV_DispatchThreadID)
+{
+    uint cmdIdx = id.x;
+    if (cmdIdx >= _BucketCount)
+    {
+        return;
+    }
+
+    uint baseOffset = cmdIdx * 5u;
+    _IndirectArgs[baseOffset + 0u] = 6u; // Unit quad (2 triangles = 6 indices)
+    _IndirectArgs[baseOffset + 1u] = 0u; // Visible instance count reset
+    _IndirectArgs[baseOffset + 2u] = 0u; // startIndex
+    _IndirectArgs[baseOffset + 3u] = 0u; // baseVertex = 0 (GLES 3.1 safe)
+    _IndirectArgs[baseOffset + 4u] = 0u; // startInstance = 0 (GLES 3.1 safe)
+}
+
+// -----------------------------------------------------------------------------
+// Kernel 2: Evaluate Animation + World Basis + Frustum/Distance Cull (2 UAVs)
+// -----------------------------------------------------------------------------
+[numthreads(64, 1, 1)]
+void CS_CullAndAnimateSprites(uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    if (idx >= _ActiveSpriteCount)
+    {
+        return;
+    }
+
+    GpuSpriteInstance inst = _SourceSprites[idx];
+
+    uint animClipIndex = inst.packedMeta & 0xFFFFu;
+    uint flags         = (inst.packedMeta >> 16) & 0xFFu;
+    uint bucketIndex   = (inst.packedMeta >> 24) & 0xFFu;
+
+    // Bit 0 = Active
+    if ((flags & 1u) == 0u || bucketIndex >= _BucketCount)
+    {
+        return;
+    }
+
+    float4 uvRect    = inst.uvRect;
+    float4 pivotSize = inst.pivotSize;
+
+    // GPU 2D Frame Animation Lookup
+    if (animClipIndex != 0xFFFFu && animClipIndex < _AnimClipCount)
+    {
+        GpuSpriteAnimClip clip = _AnimClips[animClipIndex];
+        if (clip.frameCount > 0u && clip.duration > 0.0001)
+        {
+            float t;
+            if (inst.animSpeed <= 0.0)
+            {
+                t = max(0.0, inst.animTimeOffset);
+            }
+            else
+            {
+                t = (_GlobalTime + inst.animTimeOffset) * inst.animSpeed;
+            }
+
+            float normT = t / clip.duration;
+            bool loop = ((clip.flags & 1u) != 0u) || ((flags & (1u << 3)) != 0u);
+            normT = loop ? frac(max(0.0, normT)) : saturate(normT);
+
+            uint frameOffset = min((uint)floor(normT * (float)clip.frameCount), clip.frameCount - 1u);
+            GpuSpriteAnimFrame frame = _AnimFrames[clip.frameStartIndex + frameOffset];
+            uvRect = frame.uvRect;
+            pivotSize = frame.pivotSize;
+        }
+    }
+
+    // Distance Culling (optional)
+    float maxCullDistSq = _CameraWorldPos.w;
+    if (maxCullDistSq > 0.0)
+    {
+        float3 dCam = inst.position - _CameraWorldPos.xyz;
+        if (dot(dCam, dCam) > maxCullDistSq)
+        {
+            return;
+        }
+    }
+
+    // Basis vectors (Standard 2D/3D Rotation vs Billboard)
+    float3 basisRight;
+    float3 basisUp;
+    if ((flags & (1u << 1)) != 0u) // FullBillboard
+    {
+        basisRight = _CameraRightWS.xyz;
+        basisUp    = _CameraUpWS.xyz;
+    }
+    else if ((flags & (1u << 2)) != 0u) // YAxisBillboard
+    {
+        float3 flatR = float3(_CameraRightWS.x, 0.0, _CameraRightWS.z);
+        float lenSq = dot(flatR, flatR);
+        basisRight = (lenSq > 1e-6) ? (flatR * rsqrt(lenSq)) : float3(1.0, 0.0, 0.0);
+        basisUp    = float3(0.0, 1.0, 0.0);
+    }
+    else
+    {
+        basisRight = RotateByQuat(float3(1.0, 0.0, 0.0), inst.rotation);
+        basisUp    = RotateByQuat(float3(0.0, 1.0, 0.0), inst.rotation);
+    }
+
+    float3 scaledLocalMin = basisRight * (pivotSize.x * inst.scale.x) + basisUp * (pivotSize.y * inst.scale.y);
+    float3 originWS = inst.position + scaledLocalMin;
+    float3 rightWS  = basisRight * (pivotSize.z * inst.scale.x);
+    float3 upWS     = basisUp    * (pivotSize.w * inst.scale.y);
+
+    float halfDiagSq = 0.25 * (dot(rightWS, rightWS) + dot(upWS, upWS));
+    if (halfDiagSq <= 1e-10)
+    {
+        return;
+    }
+
+    // Tight Camera Frustum Culling against 6 frustum planes
+    if (_EnableFrustumCulling != 0u)
+    {
+        float3 centerWS = originWS + 0.5 * (rightWS + upWS);
+        float radius = sqrt(halfDiagSq) + 0.02;
+
+        [unroll]
+        for (int p = 0; p < 6; p++)
+        {
+            float4 plane = _FrustumPlanes[p];
+            if (dot(plane.xyz, centerWS) + plane.w < -radius)
+            {
+                return;
+            }
+        }
+    }
+
+    // Reserve visible output slot inside bucket
+    uint writeLocalIdx = 0u;
+    InterlockedAdd(_IndirectArgs[bucketIndex * 5u + 1u], 1u, writeLocalIdx);
+
+    if (writeLocalIdx >= _MaxInstancesPerBucket)
+    {
+        uint dummy;
+        InterlockedMin(_IndirectArgs[bucketIndex * 5u + 1u], _MaxInstancesPerBucket, dummy);
+        return;
+    }
+
+    // Pack 28-bit Back-to-Front Sort Key into bits 4..31 of packedNormalFlags
+    // Higher world Y = smaller key (drawn first / behind), Lower world Y = larger key (drawn last / in front)
+    float normY = saturate((_YSortRange.y - inst.position.y) * _YSortRange.z);
+    uint sortKey28;
+    if ((flags & (1u << 7)) != 0u) // CombineOrderWithYSort: [10-bit SortingOrder | 18-bit -Y]
+    {
+        uint order10 = (uint)clamp(round(inst.sortKey) + 512.0, 0.0, 1023.0);
+        uint y18 = (uint)(normY * 262143.0);
+        sortKey28 = (order10 << 18) | y18;
+    }
+    else // Pure GpuYSort: 28-bit -Y
+    {
+        sortKey28 = (uint)(normY * 268435455.0);
+    }
+
+    uint flipNormalBit = (inst.scale.x * inst.scale.y < 0.0) ? 1u : 0u;
+    uint packingRotBits = (flags >> 5) & 0x3u;
+    uint packedNormalFlags = flipNormalBit | (packingRotBits << 1) | (sortKey28 << 4);
+
+    GpuVisibleSprite vis;
+    vis.originWS          = originWS;
+    vis.packedColorRG     = inst.packedColorRG;
+    vis.rightWS           = rightWS;
+    vis.packedColorBA     = inst.packedColorBA;
+    vis.upWS              = upWS;
+    vis.packedNormalFlags = packedNormalFlags;
+    vis.uvRect            = uvRect;
+
+    uint outIdx = bucketIndex * _MaxInstancesPerBucket + writeLocalIdx;
+    _VisibleSprites[outIdx] = vis;
+}
+
+// -----------------------------------------------------------------------------
+// Kernel 3: Build power-of-2 sort entries for a sorted bucket (1 UAV)
+// -----------------------------------------------------------------------------
+[numthreads(64, 1, 1)]
+void CS_BuildSortEntries(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= _SortCountPow2)
+    {
+        return;
+    }
+
+    uint visCount = _IndirectArgsRO[_SortBucketIndex * 5u + 1u];
+    GpuSpriteSortEntry entry;
+    if (i < visCount)
+    {
+        uint visIdx = _SortBaseOffset + i;
+        entry.sortKey = (_VisibleSpritesRO[visIdx].packedNormalFlags >> 4) & 0x0FFFFFFFu;
+        entry.visibleIndex = visIdx;
+    }
+    else
+    {
+        entry.sortKey = 0xFFFFFFFFu; // Sentinel sorts strictly to tail
+        entry.visibleIndex = 0u;
+    }
+
+    _SortEntries[_SortBaseOffset + i] = entry;
+}
+
+// -----------------------------------------------------------------------------
+// Kernel 4: Local groupshared Bitonic Sort for blocks of 256 (k = 2..256) (1 UAV)
+// -----------------------------------------------------------------------------
+groupshared GpuSpriteSortEntry s_LocalSort[256];
+
+[numthreads(256, 1, 1)]
+void CS_BitonicSortLocal(uint3 groupId : SV_GroupID, uint3 localId : SV_GroupThreadID)
+{
+    uint tid = localId.x;
+    uint globalIdx = groupId.x * 256u + tid;
+
+    GpuSpriteSortEntry initEntry;
+    if (globalIdx < _SortCountPow2)
+    {
+        initEntry = _SortEntries[_SortBaseOffset + globalIdx];
+    }
+    else
+    {
+        initEntry.sortKey = 0xFFFFFFFFu;
+        initEntry.visibleIndex = 0u;
+    }
+    s_LocalSort[tid] = initEntry;
+    GroupMemoryBarrierWithGroupSync();
+
+    [unroll]
+    for (uint k = 2u; k <= 256u; k <<= 1u)
+    {
+        [unroll]
+        for (uint j = k >> 1u; j > 0u; j >>= 1u)
+        {
+            uint ixj = tid ^ j;
+            if (ixj > tid)
+            {
+                GpuSpriteSortEntry a = s_LocalSort[tid];
+                GpuSpriteSortEntry b = s_LocalSort[ixj];
+                bool ascending = ((globalIdx & k) == 0u);
+                bool shouldSwap = ascending ? (a.sortKey > b.sortKey) : (a.sortKey < b.sortKey);
+                if (shouldSwap)
+                {
+                    s_LocalSort[tid] = b;
+                    s_LocalSort[ixj] = a;
+                }
+            }
+            GroupMemoryBarrierWithGroupSync();
+        }
+    }
+
+    if (globalIdx < _SortCountPow2)
+    {
+        _SortEntries[_SortBaseOffset + globalIdx] = s_LocalSort[tid];
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Kernel 5: Global Bitonic Merge Step for j >= 256 (1 UAV)
+// -----------------------------------------------------------------------------
+[numthreads(256, 1, 1)]
+void CS_BitonicSortGlobalStep(uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    if (idx >= _SortCountPow2)
+    {
+        return;
+    }
+
+    uint ixj = idx ^ _SortJ;
+    if (ixj > idx && ixj < _SortCountPow2)
+    {
+        GpuSpriteSortEntry a = _SortEntries[_SortBaseOffset + idx];
+        GpuSpriteSortEntry b = _SortEntries[_SortBaseOffset + ixj];
+        bool ascending = ((idx & _SortK) == 0u);
+        bool shouldSwap = ascending ? (a.sortKey > b.sortKey) : (a.sortKey < b.sortKey);
+        if (shouldSwap)
+        {
+            _SortEntries[_SortBaseOffset + idx] = b;
+            _SortEntries[_SortBaseOffset + ixj] = a;
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Kernel 6: Local groupshared Bitonic Merge Finish for j = 128..1 (1 UAV)
+// -----------------------------------------------------------------------------
+[numthreads(256, 1, 1)]
+void CS_BitonicSortLocalMerge(uint3 groupId : SV_GroupID, uint3 localId : SV_GroupThreadID)
+{
+    uint tid = localId.x;
+    uint globalIdx = groupId.x * 256u + tid;
+
+    GpuSpriteSortEntry initEntry;
+    if (globalIdx < _SortCountPow2)
+    {
+        initEntry = _SortEntries[_SortBaseOffset + globalIdx];
+    }
+    else
+    {
+        initEntry.sortKey = 0xFFFFFFFFu;
+        initEntry.visibleIndex = 0u;
+    }
+    s_LocalSort[tid] = initEntry;
+    GroupMemoryBarrierWithGroupSync();
+
+    [unroll]
+    for (uint j = 128u; j > 0u; j >>= 1u)
+    {
+        uint ixj = tid ^ j;
+        if (ixj > tid)
+        {
+            GpuSpriteSortEntry a = s_LocalSort[tid];
+            GpuSpriteSortEntry b = s_LocalSort[ixj];
+            bool ascending = ((globalIdx & _SortK) == 0u);
+            bool shouldSwap = ascending ? (a.sortKey > b.sortKey) : (a.sortKey < b.sortKey);
+            if (shouldSwap)
+            {
+                s_LocalSort[tid] = b;
+                s_LocalSort[ixj] = a;
+            }
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+
+    if (globalIdx < _SortCountPow2)
+    {
+        _SortEntries[_SortBaseOffset + globalIdx] = s_LocalSort[tid];
+    }
+}

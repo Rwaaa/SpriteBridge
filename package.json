@@ -1,0 +1,35 @@
+{
+  "name": "com.spritebridge.core",
+  "version": "1.0.0",
+  "displayName": "SpriteBridge — Zero-CPU GPU SpriteRenderer & 2D Animation Bridge (URP & Built-in RP)",
+  "description": "Drop-in GPU Compute + RenderMeshIndirect bridge for Unity SpriteRenderer and 2D Animator on URP 14–17 (URP 3D & URP 2D) and Built-in RP. Keep 100% of Unity's native SpriteRenderer workflow, SpriteAtlas batching, Flip/Pivot/Sorting parity, GPU Bitonic Y-Sort, and an optional Zero-GameObject high-density batch API.",
+  "unity": "2022.3",
+  "dependencies": {
+    "com.unity.render-pipelines.universal": "14.0.0"
+  },
+  "keywords": [
+    "sprite",
+    "2d",
+    "spriterenderer",
+    "gpu",
+    "compute",
+    "urp",
+    "rendergraph",
+    "indirect",
+    "instancing",
+    "optimization"
+  ],
+  "author": {
+    "name": "Rwaaa",
+    "email": "parkjsue@gmail.com",
+    "url": "https://github.com/Rwaaa"
+  },
+  "license": "MIT",
+  "samples": [
+    {
+      "displayName": "20,000-Sprite Animated Horde 3-Phase A/B/C Benchmark",
+      "description": "Standalone 3-Phase A/B/C benchmark comparing 20,000 built-in CPU SpriteRenderers against SpriteBridge Tier 1 Drop-In (TransformAccessArray + GPU Animation + GPU Bitonic Y-Sort) and Tier 2 Zero-GameObject Batch API.",
+      "path": "Samples~/HordeBenchmark"
+    }
+  ]
+}

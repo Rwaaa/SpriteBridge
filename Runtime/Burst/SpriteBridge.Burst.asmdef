@@ -1,0 +1,25 @@
+{
+  "name": "SpriteBridge.Burst",
+  "rootNamespace": "SpriteBridge.Burst",
+  "references": [
+    "SpriteBridge.Runtime",
+    "Unity.Burst"
+  ],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [
+    "SPRITEBRIDGE_BURST"
+  ],
+  "versionDefines": [
+    {
+      "name": "com.unity.burst",
+      "expression": "1.6.0",
+      "define": "SPRITEBRIDGE_BURST"
+    }
+  ],
+  "noEngineReferences": false
+}

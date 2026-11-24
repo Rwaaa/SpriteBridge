@@ -1,0 +1,19 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 2c135d15667ad4f89ae3ae016d633afd, type: 3}
+  m_Name: SpriteBridgeResources
+  m_EditorClassIdentifier: SpriteBridge.Runtime::SpriteBridge.SpriteBridgeResources
+  SimulationCompute: {fileID: 7200000, guid: 31b2877ed7c72408498ca490b1ba9a10, type: 3}
+  UnlitShader: {fileID: 4800000, guid: 7ef4b22c14df04d28820efcaec5fc494, type: 3}
+  Lit2DShader: {fileID: 4800000, guid: d46f6afc5e021441d8382c2b301ed887, type: 3}
+  Lit3DShader: {fileID: 4800000, guid: 3d37d577c69354be69eeedc9173b0759, type: 3}
+  PlayModeSceneViewDebugMode: 1
