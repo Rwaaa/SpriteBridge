@@ -16,4 +16,4 @@ MonoBehaviour:
   UnlitShader: {fileID: 4800000, guid: 7ef4b22c14df04d28820efcaec5fc494, type: 3}
   Lit2DShader: {fileID: 4800000, guid: d46f6afc5e021441d8382c2b301ed887, type: 3}
   Lit3DShader: {fileID: 4800000, guid: 3d37d577c69354be69eeedc9173b0759, type: 3}
-  PlayModeSceneViewDebugMode: 1
+  PlayModeSceneViewDebugMode: 0

@@ -71,6 +71,7 @@ namespace SpriteBridge
             public int ActiveCount;
             public int BaseRenderQueue;
             public bool CastAndReceive3DShadows;
+            public bool PinnedByBatchApi;
             public bool UsesGpuSort => SortMode == SpriteSortMode.GpuYSort || SortMode == SpriteSortMode.GpuOrderAndYSort;
         }
 
@@ -1113,7 +1114,12 @@ namespace SpriteBridge
             int texId = atlasTexture.GetInstanceID();
 
             SpriteBucketKey key = new SpriteBucketKey(matId, texId, sortingLayerVal, orderBucket, sortMode, layer);
-            return GetOrCreateBucket(key, sourceMaterial, atlasTexture);
+            int bucketIdx = GetOrCreateBucket(key, sourceMaterial, atlasTexture);
+            if (bucketIdx >= 0 && bucketIdx < _buckets.Count)
+            {
+                _buckets[bucketIdx].PinnedByBatchApi = true;
+            }
+            return bucketIdx;
         }
 
         /// <summary>
@@ -1501,10 +1507,35 @@ namespace SpriteBridge
                 return existingIdx;
             }
 
-            if (_buckets.Count >= MaxBuckets)
+            // First try to recycle an empty, unpinned Tier 1 bucket (e.g., temporary BucketedOrder bucket created
+            // during AddComponent<SpriteBridgeRenderer>() -> OnEnable() before SortMode = GpuYSort is set).
+            int recycleIdx = -1;
+            for (int i = 0; i < _buckets.Count; i++)
             {
-                Debug.LogWarning($"[SpriteBridge] Reached maximum bucket limit ({MaxBuckets}). Consider packing sprites into a SpriteAtlas or using GpuYSort.");
-                return -1;
+                if (_buckets[i].ActiveCount <= 0 && !_buckets[i].PinnedByBatchApi)
+                {
+                    recycleIdx = i;
+                    break;
+                }
+            }
+
+            // If at MaxBuckets and no unpinned empty bucket was found, recycle any empty bucket as fallback.
+            if (recycleIdx < 0 && _buckets.Count >= MaxBuckets)
+            {
+                for (int i = 0; i < _buckets.Count; i++)
+                {
+                    if (_buckets[i].ActiveCount <= 0)
+                    {
+                        recycleIdx = i;
+                        break;
+                    }
+                }
+
+                if (recycleIdx < 0)
+                {
+                    Debug.LogWarning($"[SpriteBridge] Reached maximum bucket limit ({MaxBuckets}). Consider packing sprites into a SpriteAtlas or using GpuYSort.");
+                    return -1;
+                }
             }
 
             Material runtimeMat = CreateBridgedMaterial(sourceMaterial, atlasTexture);
@@ -1513,8 +1544,51 @@ namespace SpriteBridge
                 return -1;
             }
 
-            int bucketIdx = _buckets.Count;
             bool supports3DShadows = runtimeMat.FindPass("ShadowCaster") >= 0;
+
+            if (recycleIdx >= 0)
+            {
+                SpriteMaterialBucket recycled = _buckets[recycleIdx];
+                _bucketLookup.Remove(recycled.Key);
+
+                if (recycled.RuntimeMaterial != null)
+                {
+                    if (Application.isPlaying)
+                    {
+                        Destroy(recycled.RuntimeMaterial);
+                    }
+                    else
+                    {
+                        DestroyImmediate(recycled.RuntimeMaterial);
+                    }
+                }
+
+                recycled.Key = key;
+                recycled.SourceMaterial = sourceMaterial;
+                recycled.RuntimeMaterial = runtimeMat;
+                recycled.AtlasTexture = atlasTexture;
+                recycled.SortingLayerValue = key.SortingLayerValue;
+                recycled.SortingOrderBucket = key.SortingOrderBucket;
+                recycled.SortMode = (SpriteSortMode)key.SortModeInt;
+                recycled.Layer = key.Layer;
+                recycled.ActiveCount = 0;
+                recycled.BaseRenderQueue = runtimeMat.renderQueue;
+                recycled.CastAndReceive3DShadows = supports3DShadows;
+                recycled.PinnedByBatchApi = false;
+
+                _bucketLookup[key] = recycleIdx;
+                _bucketOrderDirty = true;
+
+                if (recycled.UsesGpuSort)
+                {
+                    _hasAnySortedBucket = true;
+                }
+
+                BindBuffersToAllBucketMaterials();
+                return recycleIdx;
+            }
+
+            int bucketIdx = _buckets.Count;
             SpriteMaterialBucket bucket = new SpriteMaterialBucket
             {
                 BucketIndex = bucketIdx,

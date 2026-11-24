@@ -16,8 +16,8 @@ Unity 6에 도입된 **GPU Resident Drawer (GRD)**는 `BatchRendererGroup`을 �
 
 ## 1. 어떤 성능 효과를 얻을 수 있는가? (20,000 유닛 실측 벤치마크)
 
-### 측정 환경
-- **하드웨어**: Apple M4 Pro
+### 1-1. 데스크톱 실측 벤치마크 (Apple M4 Pro)
+- **하드웨어**: Apple M4 Pro (macOS Metal)
 - **엔진 환경**: Unity 6000.x (URP 17.3 RenderGraph, Linear Color Space, `vSyncCount = 0`)
 - **워크로드**: **20,000개 실시간 이동 + 8프레임 스프라이트 애니메이션 + 동적 Y-Sort 유닛** (`SpriteAtlas` 1장, 각 Phase 45프레임 & 3.0초 Warmup 후 90프레임 평균)
 
@@ -31,6 +31,20 @@ Unity 6에 도입된 **GPU Resident Drawer (GRD)**는 `BatchRendererGroup`을 �
 | **GPU Cull+Anim / Y-Sort** | `0.000 ms` | **`0.0254` / `0.0409 ms`** | **`< 0.03` / `< 0.04 ms`** | **2만 개 GPU 정렬+컬링 총 `~0.066 ms`** |
 | **Draw Calls** | `19,798.2` | **`7.0`** | **`7.0`** | **`-99.96%` 감소 (`19,798 -> 7`)** |
 | **SetPass Calls** | `18.0` | **`7.0`** | **`7.0`** | **`-61.1%` 감소** |
+
+### 1-2. 모바일 실기기 벤치마크 (Samsung Galaxy Z Fold 2 — Android Vulkan)
+- **하드웨어**: Samsung Galaxy Z Fold 2 (`SM-F916N`, Qualcomm Snapdragon 865+, `Adreno 650` GPU, Android 13, `2658×960` @ 60Hz 하드웨어 VSync)
+- **엔진 환경**: Unity 6000.x (IL2CPP ARM64, Vulkan, URP 17.3 RenderGraph)
+- **워크로드**: 동일한 **20,000개 실시간 이동 + 8프레임 스프라이트 애니메이션 + 동적 Y-Sort 유닛** (90프레임 평균)
+
+| 측정 지표 | Phase 1: 순정 `SpriteRenderer` (CPU 애니메이션 + CPU `sortingOrder` Y-Sort) | Phase 2: `SpriteBridge` Tier 1 (드롭인 `SpriteBridgeRenderer` + GPU Anim/YSort) | Phase 3: `SpriteBridge` Tier 2 (Zero-GameObject Batch API + GPU Anim/YSort) | 모바일 실기기 개선 효과 (Native $\to$ Tier 1 / Tier 2) |
+| :--- | :---: | :---: | :---: | :---: |
+| **평균 FPS (60Hz 디스플레이)** | `25.0 FPS` | **`59.9 FPS` (60Hz 풀프레임)** | **`60.6 FPS` (60Hz 풀프레임)** | **`2.40배` (`25 FPS -> 60 FPS 고정`)** |
+| **평균 Frame Time** | `40.04 ms` | **`16.68 ms`** | **`16.50 ms`** | **`-58.8%` 단축** |
+| **P95 / 최대 Frame Time** | `50.07` / `50.10 ms` | **`16.70` / `16.72 ms`** | **`33.35` / `33.40 ms`** | **Tier 1 `>20ms` 스파이크 `0 / 90f` (`0%`)** |
+| **순수 CPU 연산 시간 (`PlayerLoop - VSyncWait`)** | `40.11 ms` *(VSync 여유 0.00ms)* | **`11.49 ms`** *(VSync 여유 5.18ms)* | **`8.64 ms`** *(VSync 여유 7.92ms)* | **`3.49배` / `4.64배` CPU 가속 (`-71.4%` / `-78.5%`)** |
+| **VSync 해제 시 이론상 CPU 한계 FPS** | `24.9 FPS` | **`87.0 FPS`** | **`115.7 FPS`** | **모바일 CPU에서도 `115+ FPS` 여유 확보** |
+| **모바일 GPU Compute (`Cull+Anim` / `Y-Sort`)** | `0.000 ms` | **`0.057` / `0.093 ms`** *(총 `0.150 ms`)* | **`0.121` / `0.265 ms`** *(총 `0.386 ms`)* | **Adreno 650에서 2만 개 GPU Y-Sort `0.093 ms`** |
 
 ### Tier 1 vs Tier 2 선택 기준
 - **Tier 1 (`SpriteBridgeRenderer` 드롭인)**: 기존 `GameObject`, 프리팹, `transform.position` 이동 스크립트를 한 줄도 바꾸지 않고 컴포넌트만 부착합니다. DrawCall이 `19,798 -> 7`로 압축되고 GPU Bitonic Sort(`0.041 ms`)가 동적 Y-Sort를 처리하여 `>20ms` 스파이크가 0건이 됩니다. *(참고: Tier 1에서 남은 `PlayerLoop 8.64 ms`는 렌더링 비용이 아니라 C#에서 20,000개 `GameObject`의 `transform.position`을 호출할 때 발생하는 Unity C++ `Transform` 더티 마킹 비용입니다.)*

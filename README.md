@@ -16,8 +16,8 @@ When 2D or 2.5D games (Vampire Survivors-like hordes, bullet-hell shooters, top-
 
 ## 1. What Performance Gains Can You Expect? (Measured Benchmark)
 
-### Test Environment
-- **Hardware**: Apple M4 Pro
+### 1-1. Desktop Benchmark (Apple M4 Pro)
+- **Hardware**: Apple M4 Pro (macOS Metal)
 - **Engine**: Unity 6000.x (URP 17.3 RenderGraph, Linear Color Space, `vSyncCount = 0`)
 - **Workload**: **20,000 Moving + 8-Frame Animated + Dynamically Y-Sorted 2D Units** (Single `SpriteAtlas`, 90-frame steady-state average after 45-frame / 3.0s warmup)
 
@@ -31,6 +31,20 @@ When 2D or 2.5D games (Vampire Survivors-like hordes, bullet-hell shooters, top-
 | **GPU Cull+Anim / Y-Sort** | `0.000 ms` | **`0.0254` / `0.0409 ms`** | **`< 0.03` / `< 0.04 ms`** | **`~0.066 ms` Total GPU Compute** |
 | **Draw Calls** | `19,798.2` | **`7.0`** | **`7.0`** | **`-99.96%` (`19,798 -> 7`)** |
 | **SetPass Calls** | `18.0` | **`7.0`** | **`7.0`** | **`-61.1%` Reduction** |
+
+### 1-2. Mobile Device Benchmark (Samsung Galaxy Z Fold 2 — Android Vulkan)
+- **Hardware**: Samsung Galaxy Z Fold 2 (`SM-F916N`, Qualcomm Snapdragon 865+, `Adreno 650` GPU, Android 13, `2658×960` @ 60Hz Hardware VSync)
+- **Engine**: Unity 6000.x (IL2CPP ARM64, Vulkan, URP 17.3 RenderGraph)
+- **Workload**: Same **20,000 Moving + 8-Frame Animated + Dynamically Y-Sorted 2D Units** (90-frame steady-state average)
+
+| Metric | Phase 1: Native `SpriteRenderer` (CPU Anim + CPU `sortingOrder` Y-Sort) | Phase 2: `SpriteBridge` Tier 1 (Drop-In `SpriteBridgeRenderer` + GPU Anim/YSort) | Phase 3: `SpriteBridge` Tier 2 (Zero-GameObject Batch API + GPU Anim/YSort) | Mobile Improvement (Native $\to$ Tier 1 / Tier 2) |
+| :--- | :---: | :---: | :---: | :---: |
+| **Average FPS (60Hz Display)** | `25.0 FPS` | **`59.9 FPS` (60Hz Locked)** | **`60.6 FPS` (60Hz Locked)** | **`2.40x` (`25 FPS -> 60 FPS Cap`)** |
+| **Average Frame Time** | `40.04 ms` | **`16.68 ms`** | **`16.50 ms`** | **`-58.8%` Frame Time** |
+| **P95 / Max Frame Time** | `50.07` / `50.10 ms` | **`16.70` / `16.72 ms`** | **`33.35` / `33.40 ms`** | **Tier 1 `>20ms` Spikes `0 / 90f` (`0%`)** |
+| **Pure CPU Work (`PlayerLoop - VSyncWait`)** | `40.11 ms` *(0.00ms VSync headroom)* | **`11.49 ms`** *(5.18ms VSync headroom)* | **`8.64 ms`** *(7.92ms VSync headroom)* | **`3.49x` / `4.64x` Faster CPU (`-71.4%` / `-78.5%`)** |
+| **Unthrottled CPU Capacity FPS** | `24.9 FPS` | **`87.0 FPS`** | **`115.7 FPS`** | **`115+ FPS` Mobile CPU Headroom** |
+| **Mobile GPU Compute (`Cull+Anim` / `Y-Sort`)** | `0.000 ms` | **`0.057` / `0.093 ms`** *(`0.150 ms` total)* | **`0.121` / `0.265 ms`** *(`0.386 ms` total)* | **20k Sprites Sorted on Adreno 650 in `0.093 ms`** |
 
 ### Why Two Tiers?
 - **Tier 1 (`SpriteBridgeRenderer` Drop-In)**: Keep 100% of your existing `GameObject`s, prefabs, and `transform.position` scripts. Adding one component collapses `19,798` draw calls down to `7`, offloads 2D animation and dynamic Y-Sort (`0.041 ms` GPU Bitonic Sort) to the GPU, and eliminates all `>20ms` frame spikes. *(Note: The remaining `~8.6 ms` CPU time in Tier 1 is Unity's own C++ `Transform.position` setter cost across 20,000 `GameObject`s.)*
