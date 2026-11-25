@@ -1,5 +1,7 @@
 # SpriteBridge (`com.spritebridge.core`)
 
+![SpriteBridge Banner](Documentation~/spritebridge_banner.jpg)
+
 **[English](README.md) | [한국어 (Korean)](README.ko.md)**
 
 > **Zero-CPU GPU `SpriteRenderer`, 2D Frame Animation & GPU Bitonic `Y-Sort` Bridge for Unity (URP 14–17 2D/3D & Built-in RP)**
